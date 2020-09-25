@@ -1,0 +1,551 @@
+---
+title: "Comparison of Gompertz and Atlantis"
+author: "Ina Nilsen"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: bookdown::html_document2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center")
+
+# Loading necessary packages
+my_packages <- c("tidyverse","readxl","nlme","RColorBrewer","ggforce",
+                 "broom","knitr","kableExtra","gridExtra","conflicted","rstan")
+lapply(my_packages, library, character.only = TRUE)
+conflict_prefer("filter", "dplyr")
+
+```
+
+&nbsp;
+**Aim:** 
+*We use a multi-model approach to explore how abundance of Northeast Arctic cod impact the ecosystem and forage fish in the Barents Sea. This was done by using two different ecosystem models; Gompertz and Atlantis. The two models vary both in complexity, breadth and accessibility, i.e. the amount of time required to build and run them. The results are presented below.*
+
+```{r import, include=FALSE}
+#Data import
+workdir="~/Documents/Atlantis/Gompertz/Run_dir/" 
+
+nordic_groups <- read.table("~/Documents/Atlantis/Gompertz/Data/nordic_groups.csv", dec=".", sep=",", header=TRUE) %>% select(Code,Name) 
+
+
+folder0 = "output_00"
+folder1 = "output_01"
+folder2 = "output_02"
+folder3 = "output_07"
+folder4 = "output_08"
+folder5 = "output_09"
+folder6 = "output_10"
+folder7 = "output_11"
+
+
+run_00 <- read.table(paste(workdir, folder0, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_01 <- read.table(paste(workdir, folder1, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_02 <- read.table(paste(workdir, folder2, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_03 <- read.table(paste(workdir, folder3, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_04 <- read.table(paste(workdir, folder4, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_05 <- read.table(paste(workdir, folder5, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_06 <- read.table(paste(workdir, folder6, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+run_07 <- read.table(paste(workdir, folder7, "/ina_results_001BiomIndx.txt", sep=""), header=TRUE)
+
+
+### Make dataframe ###################
+biom.df <-bind_rows(`Base_run` = run_00,
+                    `F_0.5` = run_01,
+                    `F_2.0` = run_02,
+                    `F_0.9` = run_03,
+                    `F_1.1` = run_04,
+                    `Fmsy`       = run_05,
+                    `Fmsy2`      = run_06,
+                    `Fmsy10`    = run_07,
+                    .id="Scenarios") %>% 
+          gather(key=Species, value=Biomass, -Time, -Scenarios) %>%   
+          as_tibble() %>% 
+          rename(Day =Time) %>% 
+          mutate(Time=Day/365) %>% 
+          filter(Time>=24) %>% 
+          mutate(Year=Time+1957) %>%
+       #   filter(Species == "SCR")
+          mutate(Season = Time %% 1) %>%
+          filter(Season==0)  %>%
+          left_join(nordic_groups, by=c("Species"="Code")) 
+
+change.df <- biom.df %>%
+            filter(Scenarios == "Base_run") %>% 
+            rename(Control=Biomass) %>% 
+            select(-Scenarios) %>% 
+            left_join(biom.df) %>% 
+            mutate(Change=Biomass-Control) %>% 
+            mutate(Percentage=Change/Control*100) 
+```
+
+The simulated biomass of Northeast Arctic cod in Atlantis is known to be relatively similar to what has been observed, which would mean that it would most likely be very similar to the biomass used in Gompertz. To investigate this, we plotted the simulated biomass from Atlantis with the observed biomass used in Gompertz (Figure 1)
+
+```{r figure1, fig.cap="Comparison of observed cod biomass time serie used as inpus in Gompertz (blue line) and simulated cod biomass from Atlantis (red line)"}
+Atlantis_NCO <- biom.df %>% 
+            filter(Species == "NCO") %>% 
+            mutate(Biomass=log(Biomass*1000)) %>% 
+            filter(Scenarios=="Base_run") %>% 
+            mutate(sd =sd(Biomass), mean=mean(Biomass)) %>% 
+            mutate(Norm_biom = (Biomass - mean)/sd) %>% 
+            select(Norm_biom, Year) 
+
+
+source("R_source/Gompertz_model.R")
+Gompertz_cod <- as_tibble(zoo_dat$cod) %>% 
+                mutate(Year=1981:2016) %>% 
+                rename(Norm_biom=value)
+
+plot1 <- bind_rows(`Gompertz` = Gompertz_cod,
+                    `Atlantis` = Atlantis_NCO,
+                    .id="Model") %>% 
+          ggplot(aes(x=Year, y=Norm_biom, color=Model)) +
+          scale_color_brewer(palette = "Set1") +
+          geom_line(size=1)+
+          labs(x="Year", y="Biomass", title="Time series of cod biomass in models") +
+          theme_minimal()
+plot1
+```
+&nbsp;
+&nbsp;
+&nbsp;
+
+The results in figure 1 show that the cod biomass is very similar in both models. The simulated biomass seems to follow both the same level and trends of the observed biomass. However, the time series does not overlap each other perfectly, so it was therefore decided to test how much impact the simulated biomass data from Atlantis would affect the model results in Gompertz before altering the cod population. Figure 2 show the Gompertz response to Atlantis simulated cod biomass.
+
+&nbsp;
+&nbsp;
+
+```{r Gompertz, include = FALSE}
+source("R_source/Gompertz_model.R")
+source("R_source/function(run_Gompertz).R")
+
+BASE_data <- tidy_Gompertz(Latent.base)
+
+BASE <- BASE_data %>% 
+  group_by(Species, Year) %>% 
+  summarize(Mean=median(Biomass),Q1=quantile(Biomass,0.025),Q2=quantile(Biomass,0.975)) %>% 
+  mutate(Scenarios="Gompertz run with observed cod biomass")
+
+```
+
+```{r Scenarios, include = FALSE}
+SIM_data <-list(Base_run = "normb_NCO_00.csv", 
+     F_0.5 = "normb_NCO_01.csv", 
+     F_2.0 = "normb_NCO_02.csv",
+     F_0.9 = "normb_NCO_07.csv", 
+     F_1.1 = "normb_NCO_08.csv",
+     Fmsy = "normb_NCO_09.csv",
+     Fmsy2 = "normb_NCO_10.csv", 
+     Fmsy10 = "normb_NCO_11.csv") %>% 
+    map(~paste0("Data/", .x)) %>% 
+    map(read.table, dec=".", sep=",", header=TRUE) %>% 
+    map(~run_Gompertz(zoo = zoo_dat, cod.sim = .x$norm_b)) %>% 
+    map_df(tidy_Gompertz, .id="Scenarios")
+
+```
+
+```{r figure2, fig.width=10, fig.height=8, fig.cap="Gompertz model output run with observed cod biomass (blue) and simulated cod biomass from Atlantis (red line). "}
+SIM<- SIM_data %>% 
+  group_by(Scenarios, Species, Year) %>% 
+  summarize(Mean=median(Biomass), Q1=quantile(Biomass,0.025),Q2=quantile(Biomass,0.975))
+
+
+plot2 <- bind_rows(BASE,SIM) %>%
+  filter(Scenarios %in% c("Base_run", "Gompertz run with observed cod biomass")) %>% 
+  mutate(Scenarios = recode(Scenarios, 
+          "Base_run"="Gompertz run with Atlantis simulated cod biomass")) %>% 
+  
+  ggplot(aes(x=Year, y=Mean, ymin=Q1, ymax=Q2, fill=Scenarios)) + 
+  geom_ribbon(alpha=.4)+
+  geom_line(aes(color=Scenarios),size=1)+
+  scale_color_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x="Year", y="Biomass", title="Gompertz run with Atlantis cod biomass", colour="Scenarios") +
+  theme_minimal()+
+  facet_wrap(~Species, scales = "free_y",ncol = 1,)
+plot2
+
+```
+
+When studying figure 2 it is clear that the runs with cod biomass from Atlantis led to a higher uncertainty, especially for capelin, but also for the other species. This trend was amplified when we started altering the cod population and led to even higher uncertainty for all species. After investigating the individual runs it became clear that the reason behind this increased uncertainty was just a few unstable runs that were spinning off and giving unreasonably high values. It was decided to eliminate the unstable runs as they would not be considered reliable during analysis. To identify the unstable runs, we assembled all the C-values into a large B matrix and calculated the eigenvalue of the B matrix for all runs. According to Ives et al. 2003 the runs with eigenvalue higher than 1 could be considered unstable, while runs with eigenvalue lower than 1 could be regarded as stable. Figure 3 display the runs with eigenvalue below and above 1.
+
+&nbsp;
+&nbsp;
+
+```{r eigenvalue, include=FALSE}
+ load(file = "eigenvalue.rdata") 
+```
+
+```{r eigenvalue2, fig.width=10, fig.height=6, fig.cap="Runs with eigenvalue less than 1 regarded as stable, while runs with eigenvalue greater than 1 are unstable"}
+
+eig1 <- eigenvalue %>%
+  left_join(SIM_data) %>%
+  filter(value<1) %>%
+  filter(Scenarios == "Base_run") %>%
+  ggplot(aes(x=Year,y=Biomass, colour=factor(Run)))+
+  geom_line(show.legend = FALSE) +
+  geom_line(data=BASE_data, aes(x=Year,y=Biomass, group=factor(Run)),color="black")+               theme_minimal()+
+  labs(x="Year", y="Biomass (ln(1000 tonnes)", title="Runs with eigenvalue < 1") +
+  facet_wrap(~Species, ncol = 1, scales = "free_y")
+
+eig2 <- eigenvalue %>%
+  left_join(SIM_data) %>%
+  filter(value>1) %>%
+  filter(Scenarios == "Base_run") %>%
+  ggplot(aes(x=Year,y=Biomass, colour=factor(Run)))+
+  geom_line(show.legend = FALSE) +
+  geom_line(data=BASE_data, aes(x=Year,y=Biomass, group=factor(Run)),color="black")+               theme_minimal()+
+  labs(x="Year", y="Biomass (ln(1000 tonnes)", title="Runs with eigenvalue > 1") +
+  facet_wrap(~Species, ncol = 1, scales = "free_y")
+
+grid.arrange(eig1, eig2, nrow = 1)
+```
+\newpage
+About 30 % of the 2000 runs conducted were considered unstable when estimating the eigenvalue. In figure 3 we see the original Gompertz runs with observed cod biomass (black) compared to the Gompertz runs with simulated cod biomass from Atlantis as input (colored). The  runs with eigenvalue over 1 generally had more extreme values that would not be realistic in real ecosystems. The runs with eigenvalue under 1, on the other hand, were more similare to the original Gompertz runs, but with some variations, as would be expected. It was therefore decided to only use the stable runs for analysis in the following plots. The remaining runs were then used as the base run in Gompertz to be compared to other scenarios.
+
+\newpage
+
+```{r Datasets, include=FALSE}
+## Atlantis simulation ##########
+run.order <- c("F_0.5","F_0.9","F_1.1","F_2.0","Fmsy","Fmsy2","Fmsy10","Base_run")
+run.order2 <- c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0","Fmsy","Fmsy2","Fmsy10")
+
+spA.order <- c("Cod","Capelin","Polar cod","Medium zooplankton",
+               "Large zooplankton", "Herring")
+spG.order <- c("Capelin","Polar cod","Copepod","Krill", "Amphipods")
+
+Pal1=c("#33A02C","#B2DF8A","#FB9A99","#E31A1C","#000000")
+Pal2=c("#B3DE69","#80B1D3","#BC80BD","#000000")
+Pal3=c("#000000","#33A02C","#B2DF8A","#FB9A99","#E31A1C","#B3DE69","#80B1D3","#BC80BD")
+
+SIM_00 <- eigenvalue %>% 
+  left_join(SIM_data) %>% 
+  filter(value<1) %>% 
+  group_by(Scenarios, Species, Year) %>% 
+  summarize(Mean=median(Biomass), 
+            Q1=quantile(Biomass,0.025),Q2=quantile(Biomass,0.975)) %>%
+  ungroup() %>% 
+  mutate(Scenarios = factor(Scenarios, levels = run.order)) %>% arrange(Scenarios) %>% 
+  mutate(Species = factor(Species, levels = spG.order)) %>% arrange(Species)
+
+
+biom.b <- biom.df %>%
+          filter(Scenarios == "Base_run") %>% 
+          mutate(Biomass_log=log(Biomass*1000)) %>% 
+          group_by(Species) %>% 
+          summarize(sd =sd(Biomass_log), mean=mean(Biomass_log)) %>% 
+          left_join(biom.df) %>% 
+          mutate(Biomass_log=log(Biomass*1000)) %>% 
+          mutate(norm_b = (Biomass_log - mean)/sd) %>% 
+        #  filter(Species %in% c("NCO","CAP","PCO","ZM","ZL", "")) %>% 
+          mutate(Scenarios = factor(Scenarios, levels = run.order)) %>% arrange(Scenarios) %>% 
+          mutate(Name = factor(Name, levels = spA.order)) %>% arrange(Name) 
+
+```
+
+
+
+## Scenarios
+Seven scenarios with varying levels of cod was set up in order to study the effect of Northeast Arctic cod in the Barents Sea (Table 1). The perturbation of cod abundance in the scenarios was done by changing fishing regimes on cod. The first four runs were set up by multiplying the original fishing pressure by 0.5, 0.9, 1.1 and 2.0, while the remaining three runs had a flat fishery based on Fmsy of cod at 0.4. Two of the runs with a flat fishery also had periods of 2 x Fmsy, the first one of a period over 2 years and the second over a period of 10 years. All the seven scenarios are described in table 1
+
+
+```{r table 1 ,results='asis', align = "center"}
+Scenarios <- read.table(header = TRUE, stringsAsFactors = FALSE, sep=",", text = "Scenarios,Decription
+Base_run,Base run with historic cod fishery
+F_0.5,Historic cod fishery multiplied by 0.5
+F_0.9,Historic cod fishery multiplied by 0.9
+F_1.1,Historic cod fishery multiplied by 1.1
+F_2.0,Historic cod fishery multiplied by 2
+Fmsy,Flat cod fishery at Fmsy (0.4)
+Fmsy2,Flat cod fishery at Fmsy (0.4) with 2 years of Fmsy x 2
+Fmsy10,Flat cod fishery at Fmsy (0.4) with 10 years of Fmsy x 2") %>% 
+  as_tibble() 
+
+kable(Scenarios,
+      caption = "Description of scenarios",
+      col.names = c("Scenarios","Description")) %>% 
+  kable_styling(full_width = F)
+
+#t1 <- tableGrob(Table, theme=ttheme_minimal(), rows=1)  # transform into a tableGrob
+
+```
+
+
+```{r fishing,  fig.width=8, fig.height=5, fig.cap="Fishing scenarios implemented to alter cod abundance"}
+read_delim("Data/Runs.csv", ";") %>%
+        pivot_longer(cols = Base_run:Fmsy10,
+             names_to = "Scenarios",
+             values_to = "F_Atlantis") %>% 
+             mutate(Fishing =F_Atlantis/10, Year=(Day/365)+1957) %>% 
+           #  filter(Year>=24) %>% 
+          ggplot(aes(x=Year, y=Fishing, color=Scenarios)) + 
+            geom_line(size=1) + 
+  scale_colour_manual(values = Pal3)+  
+  labs(x="Year", y="F", title="Fishing pressure on cod") +
+  theme_minimal()
+
+```
+
+
+
+### Historic cod fisheries multiplied by a factor
+The figure below shows all of the modified runs compared to the base run (black line) in terms of total biomass as well as change in percentage. The scenarios were based on a historic cod fishery multiplied by 0.5, 0.9, 1.1 and 2.0. 
+
+```{r AtlantisCod1, fig.width=8, fig.height=3}
+codA1 <- biom.b %>% 
+      filter(Scenarios %in% c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0")) %>% 
+      filter(Species == "NCO") %>% 
+      ggplot(aes(x=Year, y=norm_b, color=Scenarios)) +  
+        scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+        geom_line(lwd=1, show.legend = FALSE) +  
+        scale_colour_manual(values = Pal1)+  
+        labs(x="Year", y="Biomass", title="Cod pertubations") +
+        theme_minimal()+
+        facet_wrap(~Name, scales = "free_y",ncol = 1)
+codA1
+
+# codA2 <- biom.b %>%
+#    filter(Scenarios %in% c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0")) %>% 
+#    filter(Species == "NCO") %>% 
+#     ggplot(aes(x=Year, y=Percentage, color=Scenarios)) +  
+#         scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+#         coord_cartesian(ylim=c(-50,50)) +
+#         geom_line(lwd=1, show.legend = FALSE) +  
+#         scale_colour_manual(values = Pal1)+  
+#         labs(x="Year", y="Change in biomass (%)", colour="Scenarios") +
+#         theme_minimal()+
+#         facet_wrap(~Name, scales = "free_y",ncol = 1)
+
+#grid.arrange(codA1, codA2, nrow = 1)
+```
+
+```{r Atlantis1, include = FALSE}
+plotA1 <- biom.b %>% 
+      filter(Scenarios %in% c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0")) %>% 
+     filter(Species %in% c("CAP","PCO","ZM","ZL","SSH")) %>%
+      ggplot(aes(x=Year, y=norm_b, color=Scenarios)) +  
+        scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+        geom_line(lwd=1, show.legend = FALSE) +  
+        scale_colour_manual(values = Pal1)+  
+        labs(x="Year", y="Biomass", title="Atlantis results") +
+        theme_minimal()+
+        facet_wrap(~Name, scales = "free_y",ncol = 1)
+
+
+# plotA2 <- biom.b %>%
+#    filter(Scenarios %in% c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0")) %>% 
+#     filter(Species %in% c("CAP","PCO","ZM","ZL","SSH")) %>%
+#     ggplot(aes(x=Year, y=Percentage, color=Scenarios)) +  
+#         scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+#         coord_cartesian(ylim=c(-50,50)) +
+#         geom_line(lwd=1, show.legend = FALSE) +  
+#         scale_colour_manual(values = Pal1)+  
+#         labs(x="Year", y="Change in biomass (%)", title="Atlantis results") +
+#         theme_minimal()+
+#         facet_wrap(~Name, scales = "free_y",ncol = 1)
+```
+
+
+```{r Gompertz1, include=FALSE}
+## Simulation of cod
+
+plotG1 <-SIM_00 %>%
+  filter(Scenarios %in% c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0")) %>%
+ ggplot(aes(x=Year, y=Mean)) + 
+      geom_line(aes(colour=Scenarios), size=1)+
+      scale_colour_manual(values = Pal1)+  scale_fill_manual(values = Pal1)+  
+      labs(x="Year", y="Biomass", title="Gompertz results", colour="Scenarios") +
+      theme_minimal()+
+      facet_wrap(~Species, scales = "free_y", ncol = 1)
+
+plotG2 <-SIM_00 %>%
+          filter(Scenarios == "Base_run") %>% 
+          select(-Scenarios, -Q1,-Q2) %>% 
+          rename(Control=Mean) %>% 
+          left_join(SIM_00) %>% 
+          mutate(Change=Mean-Control) %>% 
+          mutate(Percentage=(Change/Control)*100) %>% 
+    filter(Scenarios %in% c("Base_run","F_0.5","F_0.9","F_1.1","F_2.0")) %>%
+    mutate(Scenarios = factor(Scenarios, levels = run.order)) %>% arrange(Scenarios) %>% 
+    mutate(Species = factor(Species, levels = spG.order)) %>% arrange(Species) %>% 
+ggplot(aes(x=Year, y=Percentage, color= Scenarios)) + 
+      geom_line(size=1)+
+      scale_colour_manual(values = Pal1)+  scale_fill_manual(values = Pal1)+  
+      labs(x="Year", y="Change in %", title="Gompertz results", colour="Scenarios") +
+      theme_minimal()+
+      facet_wrap(~Species, scales = "free_y", ncol = 1)
+
+
+plotG3 <-SIM_00 %>%
+  filter(Scenarios %in% c("F_0.5","F_0.9","F_1.1","F_2.0")) %>%
+  ggplot(aes(x=Year, y=Mean, ymin=Q1, ymax=Q2)) + 
+      geom_ribbon(data=SIM_00 %>% filter(Scenarios == "Base_run") %>%
+                    select(-Scenarios), alpha=.2, linetype=1, color="black")+
+      geom_line(data=SIM_00 %>% filter(Scenarios == "Base_run") %>%
+                  select(-Scenarios),size=1)+
+      geom_ribbon(aes(fill=Scenarios, colour=Scenarios), alpha=.2, linetype=3)+
+      geom_line(aes(colour=Scenarios), size=1)+
+      scale_colour_manual(values = Pal1)+  scale_fill_manual(values = Pal1)+  
+      labs(x="Year", y="Biomass", title="Gompertz results", colour="Scenarios") +
+      theme_minimal()+
+      facet_grid(Species~Scenarios, scales = "free_y")
+
+```
+
+```{r figure4, fig.width=10, fig.height=8}
+grid.arrange(plotA1, plotG1, nrow = 1)
+#grid.arrange(plotA2, plotG2, nrow = 1)
+plotG3
+```
+
+\newpage
+
+### Flat fisheries
+The figures below show all of the modified runs compared to the historic base run (black line) in terms of total biomass as well as change in percentage. These runs were modified by implementing a flat cod fishery at MSY level = 0.4. In addition we alto implemented periods of higher fishery, first a period of 2 years and then a period of 10 years, to see how this would affect the species in both models.
+
+```{r AtlantisCod2, fig.width=8, fig.height=3}
+
+codA3 <- biom.b %>% 
+      filter(Scenarios %in% c("Base_run", "Fmsy","Fmsy2", "Fmsy10")) %>%
+      filter(Species == "NCO") %>% 
+      ggplot(aes(x=Year, y=norm_b, color=Scenarios)) +  
+        scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+        geom_line(lwd=1, show.legend = FALSE) +  
+        scale_colour_manual(values = Pal2)+  
+        labs(x="Year", y="Biomass", title="Cod pertubations") +
+        theme_minimal()+
+        facet_wrap(~Name, scales = "free_y",ncol = 1)
+codA3
+
+# codA4 <- biom.b %>%
+#         filter(Scenarios %in% c("Base_run", "Fmsy","Fmsy2", "Fmsy10")) %>%
+#         filter(Species == "NCO") %>% 
+#         ggplot(aes(x=Year, y=Percentage, color=Scenarios)) +  
+#           scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+#           geom_line(lwd=1, show.legend = FALSE) +  
+#           scale_colour_manual(values = Pal2)+  
+#           labs(x="Year", y="Change in biomass (%)", colour="Scenarios") +
+#           theme_minimal()+
+#           facet_wrap(~Name, scales = "free_y",ncol = 1)
+
+#grid.arrange(codA3, codA4, nrow = 1)
+```
+
+
+```{r Atlantis2, include = FALSE}
+
+plotA4 <- biom.b %>% 
+      filter(Scenarios %in% c("Base_run", "Fmsy","Fmsy2", "Fmsy10")) %>%
+      filter(Species %in% c("CAP", "PCO", "ZM", "ZL", "SSH")) %>% 
+      ggplot(aes(x=Year, y=norm_b, color=Scenarios)) +  
+        scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+        geom_line(lwd=1, show.legend = FALSE) +  
+        scale_colour_manual(values = Pal2)+  
+        labs(x="Year", y="Biomass", title="Atlantis results") +
+        theme_minimal()+
+        facet_wrap(~Name, scales = "free_y",ncol = 1)
+
+# plotA5 <- biom.b %>%
+#     filter(Scenarios %in% c("Base_run", "Fmsy","Fmsy2", "Fmsy10")) %>%
+#     filter(Species %in% c("CAP","PCO","ZM","ZL","SSH")) %>%
+#     ggplot(aes(x=Year, y=Percentage, color=Scenarios)) +  
+#         scale_x_continuous(limits=c(1980,2015), breaks=seq(1980,2015, 5)) +
+#         coord_cartesian(ylim=c(-60,60)) +
+#         geom_line(lwd=1, show.legend = FALSE) +  
+#         scale_colour_manual(values = Pal2)+  
+#   labs(x="Year", y="Change in biomass (%)", title="Atlantis results") +
+#         theme_minimal()+
+#         facet_wrap(~Name, scales = "free_y",ncol = 1)
+```
+
+```{r Gompertz2, include=FALSE,fig.width=10, fig.height=6}
+## Simulation of cod
+run.order <- c("Fmsy","Fmsy2","Fmsy10","Base_run")
+
+plotG4 <-SIM_00 %>%
+  filter(Scenarios %in% c("Fmsy","Fmsy2","Fmsy10","Base_run")) %>%
+  ggplot(aes(x=Year, y=Mean)) + 
+      geom_line(aes(colour=Scenarios), size=1)+
+      scale_colour_manual(values = Pal2)+  scale_fill_manual(values = Pal2)+  
+      labs(x="Year", y="Biomass", title="Gompertz results", colour="Scenarios") +
+      theme_minimal()+
+      facet_wrap(~Species, scales = "free_y", ncol = 1)
+
+plotG5 <-SIM_00 %>%
+          filter(Scenarios == "Base_run") %>% 
+          select(-Scenarios, -Q1,-Q2) %>% 
+          rename(Control=Mean) %>% 
+          left_join(SIM_00) %>% 
+          mutate(Change=Mean-Control) %>% 
+          mutate(Percentage=(Change/Control)*100) %>% 
+    filter(Scenarios %in% c("Fmsy","Fmsy2","Fmsy10","Base_run")) %>%
+    mutate(Scenarios = factor(Scenarios, levels = run.order)) %>% arrange(Scenarios) %>% 
+    mutate(Species = factor(Species, levels = spG.order)) %>% arrange(Species) %>% 
+  ggplot(aes(x=Year, y=Percentage, color= Scenarios)) + 
+      geom_line(size=1)+
+      scale_colour_manual(values = Pal2)+  scale_fill_manual(values = Pal2)+  
+      labs(x="Year", y="Change in %", title="Gompertz results", colour="Scenarios") +
+      theme_minimal()+
+      facet_wrap(~Species, scales = "free_y", ncol = 1)
+
+
+plotG6 <-SIM_00 %>%
+  filter(Species %in% c("Copepod","Krill","Amphipods","Capelin","Polar cod")) %>%
+  filter(Scenarios %in% c("Fmsy","Fmsy2","Fmsy10")) %>%
+ggplot(aes(x=Year, y=Mean, ymin=Q1, ymax=Q2)) + 
+      geom_ribbon(data=SIM_00 %>% filter(Scenarios == "Base_run") %>%
+                    select(-Scenarios), alpha=.2, linetype=1, color="black")+
+      geom_line(data=SIM_00 %>% filter(Scenarios == "Base_run") %>%
+                  select(-Scenarios),size=1)+
+      geom_ribbon(aes(fill=Scenarios, colour=Scenarios), alpha=.2, linetype=3)+
+      geom_line(aes(colour=Scenarios), size=1)+
+      scale_colour_manual(values = Pal2)+  scale_fill_manual(values = Pal2)+  
+      labs(x="Year", y="Biomass", title="Gompertz results", colour="Scenarios") +
+      theme_minimal()+
+      facet_grid(Species~Scenarios, scales = "free_y")
+
+```
+
+```{r figure5,  fig.width=10, fig.height=8}
+grid.arrange(plotA4, plotG4, nrow = 1)
+#grid.arrange(plotA5, plotG5, nrow = 1)
+plotG6
+```
+\newpage
+
+## Impact on other species in the ecosystem
+In the pervious figures we focused on species that were present in both models. This was largely determined by Gompertz as it only includes five species (capelin, polar cod, copepods, amphipods and krill). Cod and herring is also included as covariates for explaining the variation in capelin and polar cod biomasses. 
+Atlantis, on the other hand, includes 57 species and functional groups. The figure below show how these species reacted to the change in cod abundance, by showing the change in percentage of each scenario compared to the base run. The mean change was calculated over two periods of five years, one early in the simulation and one at the end.
+
+```{r impact, fig.width=9, fig.height=8, fig.cap="Component response to perturbations. Biomass change for all species in all runs during the start and the end of the simulations. Dark red/dark green areas are changes above or below 30%."}
+name.order <-c("Cod","Polar Bear", "Killer whale", "Sperm whale", "Humpback whale", "Minke whale", "Fin whale", "Bearded Seal", "Harp Seal", "Hooded Seal", "Ringed Seal", "Arctic seabirds", "Boreal seabirds", "Other sharks", "Other demersals", "Large pelagic fish", "Small pelagic fish", "Other redfish", "Large demersals", "Other flatfish", "Long rough dab", "Skates and rays", "Mesopelagic fish", "Greenland halibut", "Mackerel", "Haddock", "Saithe", "Redfish", "Blue whiting", "Herring", "Polar cod", "Capelin", "Prawns", "Squid", " Red king crab", "Gelatinous zooplankton", "Large zooplankton", "Medium zooplankton", "Small zooplankton", "Dinoflagellates", "Small phytoplankton", "Large phytoplankton", "Predatory benthos", "Detrivore benthos", "Benthic filter feeders", "Sponges", "Corals", "Pelagic bacteria", "Sediment bacteria", "Refractory detritus", "Labile detritus")
+name.order <- (rev(name.order))
+
+
+impact <- change.df %>%  
+          filter(Year>1985) %>% 
+          mutate(Time_period=case_when(
+                          Year<1990 ~ "Early period (1980-1985)",
+                          Year>2010 ~ "Late period (2010-2015)")) %>% 
+          group_by(Name, Scenarios, Time_period) %>% 
+          summarise(Change= mean(Percentage)) %>% 
+          mutate(Change = if_else(Change>30, true = 30, false = Change)) %>% 
+          mutate(Change = if_else(Change<(-30), true = (-30), false = Change)) %>% 
+          drop_na() %>% 
+          filter(Scenarios != "Base_run") %>% 
+          mutate(Name = factor(Name, levels = name.order)) %>% arrange(Name) %>% 
+          drop_na() %>%
+          ggplot(aes(x = Name, y = Scenarios, fill=Change)) + 
+              geom_raster() +
+            #  scale_y_discrete(expand = c(0,0))+
+              coord_flip() +
+              scale_y_discrete(expand=c(0,0)) +
+              scale_fill_gradientn(colours = c("darkred", "white", "darkgreen")) +
+              theme_minimal() +
+              labs(x="Year", y="Age class", fill="Change (%)") +
+              theme(strip.text = element_text(size=12, face = "italic"),
+                    axis.text.x = element_text(angle = 45,hjust=1,vjust=1)) +
+              facet_wrap(~Time_period, nrow=1)
+  
+impact
+```
+

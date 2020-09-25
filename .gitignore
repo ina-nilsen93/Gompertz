@@ -37,7 +37,13 @@ rsconnect/
 
 #Figures
 *.png
+*.jpeg
+
+#Folders
 Figures/
+Data/
+Run_dir/
+
 
 # Data
 *.csv
@@ -48,6 +54,8 @@ Figures/
 
 # Articles
 *.pdf
+*.pptx
+*.html
 
 #Odd things
 .DS_Store
